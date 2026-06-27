@@ -1,0 +1,20 @@
+body {
+  margin: 0;
+  padding: 20px;
+  color: #000;
+  font-family: sans-serif;
+}
+#video {
+  display: none;
+}
+#gl-canvas {
+  width: 100%;
+  max-width: 800px;
+  border: 2px solid #555;
+  display: block;
+}
+.info {
+  margin-top: 10px;
+  text-align: center;
+  color: #aaa;
+}
