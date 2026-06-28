@@ -32,11 +32,16 @@
     </div>
 </template>
 <script setup lang="js">
-import { ref, computed, watch, nextTick, onMounted, watchEffect } from 'vue';
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 const fileInput = ref(null);
 const uploadAreaRef = ref(null);
 const previewUrl = ref('');
 const canvasRef = ref(null);
+const glRef = ref(null);
+const extRef = ref(null);
+const vaoRef = ref(null);
+const uniforms = ref({}); // 存储 uniform 位置
+const a_position_loc = ref(null);
 const imgOriginalSize = ref({ width: 0, height: 0 });
 const imageLoaded = ref(false);
 const texture = ref(null);
@@ -47,6 +52,10 @@ const Fy = ref(0);
 const a = ref(1);
 const b = ref(1);
 const scale = ref(1);
+const uniformBuffers = {
+    lensF: new Float32Array(2),
+    lensS: new Float32Array(3),
+};
 const vsSource = `
       attribute vec2 a_position;
       varying vec2 v_ndcCoord;
@@ -62,15 +71,15 @@ const fsSource = `
       uniform vec3 uLensS;
       uniform vec2 uLensF;
       vec2 GLCoord2TextureCoord(vec2 glCoord) {
-	    return glCoord  * vec2(1.0, -1.0)/ 2.0 + vec2(0.5, 0.5);
+	    return glCoord * vec2(1.0, -1.0) / 2.0 + vec2(0.5, 0.5);
       }
       void main() {
         float scale = uLensS.z;
         float Fx = uLensF.x;
 	    float Fy = uLensF.y;
         vec2 vMapping = v_ndcCoord;
-        vMapping.x = v_ndcCoord.x + ((pow(v_ndcCoord.y, 2.0)/scale)*v_ndcCoord.x/scale)*-Fx;
-	    vMapping.y = v_ndcCoord.y + ((pow(v_ndcCoord.x, 2.0)/scale)*v_ndcCoord.y/scale)*-Fy;
+        vMapping.x = v_ndcCoord.x + ((v_ndcCoord.y * v_ndcCoord.y) / scale) * v_ndcCoord.x / scale * -Fx;
+	    vMapping.y = v_ndcCoord.y + ((v_ndcCoord.x * v_ndcCoord.x) / scale) * v_ndcCoord.y / scale * -Fy;
         vMapping *= uLensS.xy;
         vMapping /= scale;
 	    vMapping = GLCoord2TextureCoord(vMapping);
@@ -95,67 +104,73 @@ const initWebgl = () => {
         canvas.getContext("webgl") ||
         canvas.getContext("experimental-webgl");
     if (!gl) {
-        throw new Error("WebGL not supported");
+        console.error("WebGL not supported");
+        return;
     }
+    glRef.value = gl;
+    const ext = gl.getExtension('OES_vertex_array_object');
+    if (!ext) {
+        console.warn('当前浏览器不支持 VAO 扩展！');
+        return;
+    }
+    extRef.value = ext;
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+    if (!vertexShader || !fragmentShader) return;
     program.value = gl.createProgram();
     gl.attachShader(program.value, vertexShader);
     gl.attachShader(program.value, fragmentShader);
     gl.linkProgram(program.value);
-    gl.uLensS = gl.getUniformLocation(program.value, "uLensS");
-    gl.uLensF = gl.getUniformLocation(program.value, "uLensF");
     if (!gl.getProgramParameter(program.value, gl.LINK_STATUS)) {
         console.error("Program link error:", gl.getProgramInfoLog(program.value));
+        return;
+    }
+    a_position_loc.value = gl.getAttribLocation(program.value, "a_position");
+    uniforms.value = {
+        uLensS: gl.getUniformLocation(program.value, "uLensS"),
+        uLensF: gl.getUniformLocation(program.value, "uLensF"),
     }
     positionBuffer.value = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer.value);
     const positions = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    const vao = ext.createVertexArrayOES();
+    ext.bindVertexArrayOES(vao);
+    gl.enableVertexAttribArray(a_position_loc.value);
+    gl.vertexAttribPointer(a_position_loc.value, 2, gl.FLOAT, false, 0, 0);
+    ext.bindVertexArrayOES(null);
+    vaoRef.value = vao;
     texture.value = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture.value);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
 }
-const resizeWebglDrawRegion = (x, y, width, height) => {
+const renderFrame = () => {
     const canvas = canvasRef.value;
-    const gl =
-        canvas.getContext("webgl") ||
-        canvas.getContext("experimental-webgl");
-    gl.viewport(x, y, width, height);
-}
-const render = (source) => {
-    const canvas = canvasRef.value;
-    const gl =
-        canvas.getContext("webgl") ||
-        canvas.getContext("experimental-webgl");
-    gl.bindTexture(gl.TEXTURE_2D, texture.value);
-    gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        source,
-    );
+    const gl = glRef.value;
+    const ext = extRef.value;
+    if (!gl || !ext || !vaoRef.value || !imageLoaded.value) return;
     gl.useProgram(program.value);
-    gl.uniform2fv(gl.uLensF, [Fx.value, Fy.value]);
-    gl.uniform3fv(gl.uLensS, [
-        a.value,
-        b.value,
-        scale.value,
-    ]);
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer.value);
-    const posLoc = gl.getAttribLocation(program.value, "a_position");
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    uniformBuffers.lensF[0] = Fx.value;
+    uniformBuffers.lensF[1] = Fy.value;
+    gl.uniform2fv(uniforms.value.uLensF, uniformBuffers.lensF);
+    uniformBuffers.lensS[0] = a.value;
+    uniformBuffers.lensS[1] = b.value;
+    uniformBuffers.lensS[2] = scale.value;
+    gl.uniform3fv(uniforms.value.uLensS, uniformBuffers.lensS);
+    ext.bindVertexArrayOES(vaoRef.value);
+    gl.bindTexture(gl.TEXTURE_2D, texture.value);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    ext.bindVertexArrayOES(null);
 }
 const drawImageToCanvas = async () => {
     await nextTick();
     const canvas = canvasRef.value;
+    const gl = glRef.value;
     const uploadArea = uploadAreaRef.value;
     if (!canvas || !uploadArea || !previewUrl.value) return;
     const boxW = uploadArea.clientWidth;
@@ -178,33 +193,40 @@ const drawImageToCanvas = async () => {
         y = 0;
         x = (boxW - finalW) / 2;
     }
+    gl.viewport(Math.round(x), Math.round(y), Math.round(finalW), Math.round(finalH));
     const img = new Image();
     img.onload = () => {
-        resizeWebglDrawRegion(x, y, finalW, finalH);
-        render(img);
+        gl.bindTexture(gl.TEXTURE_2D, texture.value);
+        gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            img,
+        );
+        renderFrame();
     };
     img.src = previewUrl.value;
 };
-const getImageSize = (file) => {
-    return new Promise((resolve) => {
-        if (previewUrl.value) {
-            URL.revokeObjectURL(previewUrl.value);
-        }
-        const img = new Image();
-        const objectUrl = URL.createObjectURL(file);
-        img.onload = () => {
-            resolve({ width: img.width, height: img.height });
-        };
-        img.src = objectUrl;
-        previewUrl.value = objectUrl;
-    });
-};
 const processFile = async (file) => {
     if (!file || !file.type.startsWith('image/')) return;
+    if (previewUrl.value) {
+        URL.revokeObjectURL(previewUrl.value);
+    }
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
     imageLoaded.value = false;
-    const size = await getImageSize(file);
-    imgOriginalSize.value = size;
-    imageLoaded.value = true;
+    img.onload = () => {
+        imgOriginalSize.value = { width: img.width, height: img.height };
+        imageLoaded.value = true;
+    };
+    img.onerror = () => {
+        console.error("图片加载失败");
+        URL.revokeObjectURL(objectUrl);
+    };
+    img.src = objectUrl;
+    previewUrl.value = objectUrl;
 };
 const triggerFileSelect = () => fileInput.value.click();
 const handleFileChange = (event) => {
@@ -218,8 +240,16 @@ const handleDrop = (event) => {
 onMounted(() => {
     initWebgl();
 })
-watch([imageLoaded, Fx, Fy, a, b, scale], ([imageLoaded]) => {
-    if (imageLoaded) drawImageToCanvas();
+onUnmounted(() => {
+    if (previewUrl.value) {
+        URL.revokeObjectURL(previewUrl.value);
+    }
+})
+watch(imageLoaded, (newVal) => {
+    if (newVal) drawImageToCanvas();
+})
+watch([Fx, Fy, a, b, scale], () => {
+    if (imageLoaded.value) renderFrame();
 })
 </script>
 <style scoped>

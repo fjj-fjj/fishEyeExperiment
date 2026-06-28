@@ -27,17 +27,17 @@
     </div>
     <div class="slider-block">
         <span class="demonstration">k1</span>
-        <el-slider v-model="k1" :min="-1" :max="1" :step="0.01" show-input />
+        <el-slider v-model="k1" :min="-1" :max="1" :step="0.00001" show-input />
         <div class="tip">{{ k1 }}</div>
     </div>
     <div class="slider-block">
         <span class="demonstration">k2</span>
-        <el-slider v-model="k2" :min="-1" :max="1" :step="0.001" show-input />
+        <el-slider v-model="k2" :min="-1" :max="1" :step="0.00001" show-input />
         <div class="tip">{{ k2 }}</div>
     </div>
     <div class="slider-block">
         <span class="demonstration">k3</span>
-        <el-slider v-model="k3" :min="-1" :max="1" :step="0.0001" show-input />
+        <el-slider v-model="k3" :min="-1" :max="1" :step="0.00001" show-input />
         <div class="tip">{{ k3 }}</div>
     </div>
     <div class="slider-block">
@@ -47,19 +47,21 @@
     </div>
 </template>
 <script setup lang="js">
-import { ref, computed, watch, nextTick, onMounted } from 'vue';
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 const fileInput = ref(null);
 const uploadAreaRef = ref(null);
 const previewUrl = ref('');
 const canvasRef = ref(null);
 const glRef = ref(null);
+const extRef = ref(null);
+const vaoRef = ref(null);
 const imgOriginalSize = ref({ width: 0, height: 0 });
-const imgFinalSize = ref({ width: 0, height: 0 });
 const imageLoaded = ref(false);
 const texture = ref(null);
 const program = ref(null);
 const positionBuffer = ref(null);
 const uniforms = ref({}); // 存储 uniform 位置
+const a_position_loc = ref(null);
 const fx = ref(0);
 const fy = ref(0);
 const cx = ref(1);
@@ -68,6 +70,11 @@ const k1 = ref(0);
 const k2 = ref(0);
 const k3 = ref(0);
 const k4 = ref(0);
+const uniformBuffers = {
+    u_imageSize: new Float32Array(2),
+    u_distort: new Float32Array(4),
+    u_intrinsic: new Float32Array(4),
+};
 const vsSource = `
       attribute vec2 a_position;
       varying vec2 v_texCoord;
@@ -93,10 +100,6 @@ const fsSource = `
         float x = (u - cx) / fx;
         float y = (v - cy) / fy;
         float r = sqrt(x * x + y * y);
-        if(r < 0.0001) { // 中心像素无畸变
-            gl_FragColor = texture2D(u_texture, v_texCoord);
-            return;
-        }
         float theta = atan(r);
         float theta2 = theta * theta;
         float theta4 = theta2 * theta2;
@@ -107,12 +110,16 @@ const fsSource = `
         float k3 = u_distort.z;
         float k4 = u_distort.w;
         float theta_d = theta * (1.0 + k1*theta2 + k2*theta4 + k3*theta6 + k4*theta8);
-        float scale = theta_d / r;
+        float scale = theta_d / max(r, 0.0001);
         float x_dist = x * scale;
         float y_dist = y * scale;
         float u_src = fx * x_dist + cx;
         float v_src = fy * y_dist + cy;
         vec2 src_tex = vec2(u_src / u_imageSize.x, v_src / u_imageSize.y);
+        if (src_tex.x < 0.0 || src_tex.x > 1.0 || src_tex.y < 0.0 || src_tex.y > 1.0) {
+            gl_FragColor = vec4(0.0);
+            return;
+        }
         gl_FragColor = texture2D(u_texture, src_tex);
       }
     `;
@@ -133,49 +140,75 @@ const initWebgl = () => {
         canvas.getContext("webgl") ||
         canvas.getContext("experimental-webgl");
     if (!gl) {
-        throw new Error("WebGL not supported");
+        console.error("WebGL not supported");
+        return;
     }
     glRef.value = gl;
+    const ext = gl.getExtension('OES_vertex_array_object');
+    if (!ext) {
+        console.warn('当前浏览器不支持 VAO 扩展！');
+        return;
+    }
+    extRef.value = ext;
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+    if (!vertexShader || !fragmentShader) return;
     program.value = gl.createProgram();
     gl.attachShader(program.value, vertexShader);
     gl.attachShader(program.value, fragmentShader);
     gl.linkProgram(program.value);
+    if (!gl.getProgramParameter(program.value, gl.LINK_STATUS)) {
+        console.error("Program link error:", gl.getProgramInfoLog(program.value));
+        return;
+    }
+    a_position_loc.value = gl.getAttribLocation(program.value, "a_position");
     uniforms.value = {
         u_texture: gl.getUniformLocation(program.value, 'u_texture'),
         u_imageSize: gl.getUniformLocation(program.value, 'u_imageSize'),
         u_distort: gl.getUniformLocation(program.value, 'u_distort'),
         u_intrinsic: gl.getUniformLocation(program.value, 'u_intrinsic'),
     };
-    if (!gl.getProgramParameter(program.value, gl.LINK_STATUS)) {
-        console.error("Program link error:", gl.getProgramInfoLog(program.value));
-    }
     positionBuffer.value = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer.value);
     const positions = new Float32Array([-1, 1, -1, -1, 1, 1, 1, -1]);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    const vao = ext.createVertexArrayOES();
+    ext.bindVertexArrayOES(vao);
+    gl.enableVertexAttribArray(a_position_loc.value);
+    gl.vertexAttribPointer(a_position_loc.value, 2, gl.FLOAT, false, 0, 0);
+    ext.bindVertexArrayOES(null);
+    vaoRef.value = vao;
     texture.value = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture.value);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
 }
 const renderFrame = () => {
     const gl = glRef.value;
-    if (!gl || !imageLoaded.value) return;
+    const ext = extRef.value;
+    if (!gl || !ext || !vaoRef.value || !imageLoaded.value) return;
     gl.useProgram(program.value);
-    gl.uniform2fv(uniforms.value.u_imageSize, [imgFinalSize.value.width, imgFinalSize.value.height]);
-    gl.uniform4fv(uniforms.value.u_distort, [k1.value, k2.value, k3.value, k4.value]);
-    gl.uniform4fv(uniforms.value.u_intrinsic, [fx.value, fy.value, cx.value, cy.value]);
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer.value);
-    const posLoc = gl.getAttribLocation(program.value, "a_position");
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    uniformBuffers.u_imageSize[0] = imgOriginalSize.value.width;
+    uniformBuffers.u_imageSize[1] = imgOriginalSize.value.height;
+    gl.uniform2fv(uniforms.value.u_imageSize, uniformBuffers.u_imageSize);
+    uniformBuffers.u_distort[0] = k1.value;
+    uniformBuffers.u_distort[1] = k2.value;
+    uniformBuffers.u_distort[2] = k3.value;
+    uniformBuffers.u_distort[3] = k4.value;
+    gl.uniform4fv(uniforms.value.u_distort, uniformBuffers.u_distort);
+    uniformBuffers.u_intrinsic[0] = fx.value;
+    uniformBuffers.u_intrinsic[1] = fy.value;
+    uniformBuffers.u_intrinsic[2] = cx.value;
+    uniformBuffers.u_intrinsic[3] = cy.value;
+    gl.uniform4fv(uniforms.value.u_intrinsic, uniformBuffers.u_intrinsic);
+    ext.bindVertexArrayOES(vaoRef.value);
     gl.bindTexture(gl.TEXTURE_2D, texture.value);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    ext.bindVertexArrayOES(null);
 }
 const drawImageToCanvas = async () => {
     await nextTick();
@@ -203,15 +236,11 @@ const drawImageToCanvas = async () => {
         y = 0;
         x = (boxW - finalW) / 2;
     }
-    fx.value = finalW;
-    fy.value = finalH;
-    cx.value = finalW / 2;
-    cy.value = finalH / 2;
-    imgFinalSize.value = {
-        width: finalW,
-        height: finalH,
-    }
-    gl.viewport(x, y, finalW, finalH);
+    fx.value = imgW;
+    fy.value = imgH;
+    cx.value = imgW / 2;
+    cy.value = imgH / 2;
+    gl.viewport(Math.round(x), Math.round(y), Math.round(finalW), Math.round(finalH));
     const img = new Image();
     img.onload = () => {
         gl.bindTexture(gl.TEXTURE_2D, texture.value);
@@ -227,26 +256,24 @@ const drawImageToCanvas = async () => {
     };
     img.src = previewUrl.value;
 };
-const getImageSize = (file) => {
-    return new Promise((resolve) => {
-        if (previewUrl.value) {
-            URL.revokeObjectURL(previewUrl.value);
-        }
-        const img = new Image();
-        const objectUrl = URL.createObjectURL(file);
-        img.onload = () => {
-            resolve({ width: img.width, height: img.height });
-        };
-        img.src = objectUrl;
-        previewUrl.value = objectUrl;
-    });
-};
 const processFile = async (file) => {
     if (!file || !file.type.startsWith('image/')) return;
+    if (previewUrl.value) {
+        URL.revokeObjectURL(previewUrl.value);
+    }
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
     imageLoaded.value = false;
-    const size = await getImageSize(file);
-    imgOriginalSize.value = size;
-    imageLoaded.value = true;
+    img.onload = () => {
+        imgOriginalSize.value = { width: img.width, height: img.height };
+        imageLoaded.value = true;
+    };
+    img.onerror = () => {
+        console.error("图片加载失败");
+        URL.revokeObjectURL(objectUrl);
+    };
+    img.src = objectUrl;
+    previewUrl.value = objectUrl;
 };
 const triggerFileSelect = () => fileInput.value.click();
 const handleFileChange = (event) => {
@@ -259,6 +286,11 @@ const handleDrop = (event) => {
 };
 onMounted(() => {
     initWebgl();
+})
+onUnmounted(() => {
+    if (previewUrl.value) {
+        URL.revokeObjectURL(previewUrl.value);
+    }
 })
 watch(imageLoaded, (newVal) => {
     if (newVal) drawImageToCanvas();
