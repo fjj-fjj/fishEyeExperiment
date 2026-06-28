@@ -52,16 +52,17 @@ const fileInput = ref(null);
 const uploadAreaRef = ref(null);
 const previewUrl = ref('');
 const canvasRef = ref(null);
-const glRef = ref(null);
-const extRef = ref(null);
-const vaoRef = ref(null);
-const imgOriginalSize = ref({ width: 0, height: 0 });
 const imageLoaded = ref(false);
-const texture = ref(null);
-const program = ref(null);
-const positionBuffer = ref(null);
-const uniforms = ref({}); // 存储 uniform 位置
-const a_position_loc = ref(null);
+let gl;
+let ext;
+let vao;
+let imgOriginalSize = { width: 0, height: 0 };
+let texture;
+let program;
+let positionBuffer;
+let uniforms = {}; // 存储 uniform 位置
+let a_position_loc;
+let lastBoundTexture;
 const fx = ref(0);
 const fy = ref(0);
 const cx = ref(1);
@@ -136,50 +137,48 @@ const createShader = (gl, type, source) => {
 }
 const initWebgl = () => {
     const canvas = canvasRef.value;
-    const gl =
+    gl =
         canvas.getContext("webgl") ||
         canvas.getContext("experimental-webgl");
     if (!gl) {
         console.error("WebGL not supported");
         return;
     }
-    glRef.value = gl;
-    const ext = gl.getExtension('OES_vertex_array_object');
+    ext = gl.getExtension('OES_vertex_array_object');
     if (!ext) {
         console.warn('当前浏览器不支持 VAO 扩展！');
         return;
     }
-    extRef.value = ext;
     const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
     const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
     if (!vertexShader || !fragmentShader) return;
-    program.value = gl.createProgram();
-    gl.attachShader(program.value, vertexShader);
-    gl.attachShader(program.value, fragmentShader);
-    gl.linkProgram(program.value);
-    if (!gl.getProgramParameter(program.value, gl.LINK_STATUS)) {
-        console.error("Program link error:", gl.getProgramInfoLog(program.value));
+    program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error("Program link error:", gl.getProgramInfoLog(program));
         return;
     }
-    a_position_loc.value = gl.getAttribLocation(program.value, "a_position");
-    uniforms.value = {
-        u_texture: gl.getUniformLocation(program.value, 'u_texture'),
-        u_imageSize: gl.getUniformLocation(program.value, 'u_imageSize'),
-        u_distort: gl.getUniformLocation(program.value, 'u_distort'),
-        u_intrinsic: gl.getUniformLocation(program.value, 'u_intrinsic'),
+    a_position_loc = gl.getAttribLocation(program, "a_position");
+    uniforms = {
+        u_texture: gl.getUniformLocation(program, 'u_texture'),
+        u_imageSize: gl.getUniformLocation(program, 'u_imageSize'),
+        u_distort: gl.getUniformLocation(program, 'u_distort'),
+        u_intrinsic: gl.getUniformLocation(program, 'u_intrinsic'),
     };
-    positionBuffer.value = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer.value);
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     const positions = new Float32Array([-1, 1, -1, -1, 1, 1, 1, -1]);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-    const vao = ext.createVertexArrayOES();
+    vao = ext.createVertexArrayOES();
     ext.bindVertexArrayOES(vao);
-    gl.enableVertexAttribArray(a_position_loc.value);
-    gl.vertexAttribPointer(a_position_loc.value, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(a_position_loc);
+    gl.vertexAttribPointer(a_position_loc, 2, gl.FLOAT, false, 0, 0);
     ext.bindVertexArrayOES(null);
-    vaoRef.value = vao;
-    texture.value = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, texture.value);
+    texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    lastBoundTexture = texture;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -187,25 +186,28 @@ const initWebgl = () => {
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
 }
 const renderFrame = () => {
-    const gl = glRef.value;
-    const ext = extRef.value;
-    if (!gl || !ext || !vaoRef.value || !imageLoaded.value) return;
-    gl.useProgram(program.value);
-    uniformBuffers.u_imageSize[0] = imgOriginalSize.value.width;
-    uniformBuffers.u_imageSize[1] = imgOriginalSize.value.height;
-    gl.uniform2fv(uniforms.value.u_imageSize, uniformBuffers.u_imageSize);
+    if (!gl || !ext || !vao || !imageLoaded.value) return;
+    gl.useProgram(program);
+    uniformBuffers.u_imageSize[0] = imgOriginalSize.width;
+    uniformBuffers.u_imageSize[1] = imgOriginalSize.height;
+    gl.uniform2fv(uniforms.u_imageSize, uniformBuffers.u_imageSize);
     uniformBuffers.u_distort[0] = k1.value;
     uniformBuffers.u_distort[1] = k2.value;
     uniformBuffers.u_distort[2] = k3.value;
     uniformBuffers.u_distort[3] = k4.value;
-    gl.uniform4fv(uniforms.value.u_distort, uniformBuffers.u_distort);
+    gl.uniform4fv(uniforms.u_distort, uniformBuffers.u_distort);
     uniformBuffers.u_intrinsic[0] = fx.value;
     uniformBuffers.u_intrinsic[1] = fy.value;
     uniformBuffers.u_intrinsic[2] = cx.value;
     uniformBuffers.u_intrinsic[3] = cy.value;
-    gl.uniform4fv(uniforms.value.u_intrinsic, uniformBuffers.u_intrinsic);
-    ext.bindVertexArrayOES(vaoRef.value);
-    gl.bindTexture(gl.TEXTURE_2D, texture.value);
+    gl.uniform4fv(uniforms.u_intrinsic, uniformBuffers.u_intrinsic);
+    gl.activeTexture(gl.TEXTURE0);
+    if (lastBoundTexture !== texture) {
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        lastBoundTexture = texture;
+    }
+    gl.uniform1i(uniforms.u_texture, 0);
+    ext.bindVertexArrayOES(vao);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     ext.bindVertexArrayOES(null);
@@ -214,14 +216,13 @@ const drawImageToCanvas = async () => {
     await nextTick();
     const canvas = canvasRef.value;
     const uploadArea = uploadAreaRef.value;
-    const gl = glRef.value;
     if (!canvas || !uploadArea || !previewUrl.value || !gl) return;
     const boxW = uploadArea.clientWidth;
     const boxH = uploadArea.clientHeight;
     canvas.width = boxW;
     canvas.height = boxH;
-    const imgW = imgOriginalSize.value.width;
-    const imgH = imgOriginalSize.value.height;
+    const imgW = imgOriginalSize.width;
+    const imgH = imgOriginalSize.height;
     const boxRatio = boxW / boxH;
     const imgRatio = imgW / imgH;
     let finalW, finalH, x, y;
@@ -243,7 +244,7 @@ const drawImageToCanvas = async () => {
     gl.viewport(Math.round(x), Math.round(y), Math.round(finalW), Math.round(finalH));
     const img = new Image();
     img.onload = () => {
-        gl.bindTexture(gl.TEXTURE_2D, texture.value);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texImage2D(
             gl.TEXTURE_2D,
             0,
@@ -265,7 +266,8 @@ const processFile = async (file) => {
     const objectUrl = URL.createObjectURL(file);
     imageLoaded.value = false;
     img.onload = () => {
-        imgOriginalSize.value = { width: img.width, height: img.height };
+        imgOriginalSize.width = img.width;
+        imgOriginalSize.height = img.height;
         imageLoaded.value = true;
     };
     img.onerror = () => {
