@@ -63,8 +63,10 @@ let a_position_loc;
 let lastBoundTexture;
 let viewportOffset = { x: 0, y: 0 };
 let zoomLevel = 1.0;
-let initialViewport = { x: 0, y: 0, w: 0, h: 0 };
-const MIN_ZOOM = 0.1;
+let isDragging = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+const MIN_ZOOM = 1.0;
 const MAX_ZOOM = 10.0;
 const fx = ref(0);
 const fy = ref(0);
@@ -81,10 +83,12 @@ const uniformBuffers = {
 };
 const vsSource = `
       attribute vec2 a_position;
+      uniform float u_Zoom;
+      uniform vec2 u_PanOffset;
       varying vec2 v_texCoord;
       void main() {
         v_texCoord = vec2((a_position.x + 1.0) / 2.0, (1.0 - a_position.y) / 2.0);
-        gl_Position = vec4(a_position, 0.0, 1.0);
+        gl_Position = vec4(a_position * u_Zoom + u_PanOffset, 0.0, 1.0);
       }
     `;
 const fsSource = `
@@ -165,6 +169,8 @@ const initWebgl = () => {
     }
     a_position_loc = gl.getAttribLocation(program, "a_position");
     uniforms = {
+        u_Zoom: gl.getUniformLocation(program, 'u_Zoom'),
+        u_PanOffset: gl.getUniformLocation(program, 'u_PanOffset'),
         u_texture: gl.getUniformLocation(program, 'u_texture'),
         u_imageSize: gl.getUniformLocation(program, 'u_imageSize'),
         u_distort: gl.getUniformLocation(program, 'u_distort'),
@@ -204,6 +210,8 @@ const renderFrame = () => {
     uniformBuffers.u_intrinsic[2] = cx.value;
     uniformBuffers.u_intrinsic[3] = cy.value;
     gl.uniform4fv(uniforms.u_intrinsic, uniformBuffers.u_intrinsic);
+    gl.uniform1f(uniforms.u_Zoom, zoomLevel);
+    gl.uniform2f(uniforms.u_PanOffset, viewportOffset.x, viewportOffset.y);
     gl.activeTexture(gl.TEXTURE0);
     if (lastBoundTexture !== texture) {
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -240,14 +248,13 @@ const drawImageToCanvas = async () => {
         y = 0;
         x = (boxW - finalW) / 2;
     }
-    initialViewport = { x: Math.round(x), y: Math.round(y), w: Math.round(finalW), h: Math.round(finalH) };
     zoomLevel = 1.0;
     viewportOffset = { x: 0, y: 0 };
     fx.value = imgW;
     fy.value = imgH;
     cx.value = imgW / 2;
     cy.value = imgH / 2;
-    gl.viewport(initialViewport.x, initialViewport.y, initialViewport.w, initialViewport.h);
+    gl.viewport(Math.round(x), Math.round(y), Math.round(finalW), Math.round(finalH));
     const img = new Image();
     img.onload = () => {
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -292,41 +299,91 @@ const handleDrop = (event) => {
     const file = event.dataTransfer.files[0];
     if (file) processFile(file);
 };
+const applyBoundaryConstraints = () => {
+    const distToViewportLeft = viewportOffset.x + 1.0;
+    if (distToViewportLeft > zoomLevel) {
+        viewportOffset.x = -1.0 + zoomLevel;
+    }
+    const distToViewportRight = 1.0 - viewportOffset.x;
+    if (distToViewportRight > zoomLevel) {
+        viewportOffset.x = 1.0 - zoomLevel;
+    }
+    const distToViewportTop = 1.0 - viewportOffset.y;
+    if (distToViewportTop > zoomLevel) {
+        viewportOffset.y = 1.0 - zoomLevel;
+    }
+    const distToViewportBottom = viewportOffset.y + 1.0;
+    if (distToViewportBottom > zoomLevel) {
+        viewportOffset.y = -1.0 + zoomLevel;
+    }
+}
 const handleWheel = (event) => {
     if (!imageLoaded.value) return;
     event.preventDefault();
     const zoomIntensity = 0.1;
     const wheel = event.deltaY < 0 ? 1 : -1;
     const zoomFactor = Math.exp(wheel * zoomIntensity);
-    const newZoom = zoomLevel * zoomFactor;
-    zoomLevel = newZoom;
-    if (newZoom < MIN_ZOOM || newZoom > MAX_ZOOM) return;
+    let newZoom = zoomLevel * zoomFactor;
+    if (newZoom < MIN_ZOOM) newZoom = MIN_ZOOM;
+    if (newZoom > MAX_ZOOM) newZoom = MAX_ZOOM;
     const canvas = canvasRef.value;
     const rect = canvas.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
-    const currentCenterX = initialViewport.x + initialViewport.w / 2 + viewportOffset.x;
-    const currentCenterY = initialViewport.y + initialViewport.h / 2 + viewportOffset.y;
-    const newCenterX = mouseX + (currentCenterX - mouseX) * zoomFactor;
-    const newCenterY = mouseY + (currentCenterY - mouseY) * zoomFactor;
-    viewportOffset = {
-        x: newCenterX - (initialViewport.x + initialViewport.w / 2),
-        y: newCenterY - (initialViewport.y + initialViewport.h / 2)
-    };
-    const newW = initialViewport.w * zoomLevel;
-    const newH = initialViewport.h * zoomLevel;
-    const newX = initialViewport.x + viewportOffset.x - (newW - initialViewport.w) / 2;
-    const newY = initialViewport.y + viewportOffset.y - (newH - initialViewport.h) / 2;
-    gl.viewport(Math.round(newX), Math.round(newY), Math.round(newW), Math.round(newH));
+    const mouseXNDC = ((event.clientX - rect.left) / canvas.width) * 2.0 - 1.0;
+    const mouseYNDC = -(((event.clientY - rect.top) / canvas.height) * 2.0 - 1.0);
+    viewportOffset.x = mouseXNDC - (mouseXNDC - viewportOffset.x) * zoomFactor;
+    viewportOffset.y = mouseYNDC - (mouseYNDC - viewportOffset.y) * zoomFactor;
+    zoomLevel = newZoom;
+    applyBoundaryConstraints();
     renderFrame();
+};
+const handleMouseDown = (event) => {
+    if (!imageLoaded.value) return;
+    isDragging = true;
+    lastMouseX = event.clientX;
+    lastMouseY = event.clientY;
+    canvasRef.value.style.cursor = 'grabbing';
+};
+const handleMouseMove = (event) => {
+    if (event.buttons === 0 && isDragging) {
+        // 检测到鼠标按键已经松开（即使 mouseup 事件没触发）
+        handleMouseUp();
+        return;
+    }
+    if (!isDragging || !imageLoaded.value) return;
+    const canvas = canvasRef.value;
+    const rect = canvas.getBoundingClientRect();
+    const deltaX = event.clientX - lastMouseX;
+    const deltaY = event.clientY - lastMouseY;
+    const ndcDeltaX = (deltaX / rect.width) * 2.0;
+    const ndcDeltaY = (deltaY / rect.height) * 2.0;
+    viewportOffset.x += ndcDeltaX;
+    viewportOffset.y -= ndcDeltaY;
+    applyBoundaryConstraints();
+    lastMouseX = event.clientX;
+    lastMouseY = event.clientY;
+    renderFrame();
+};
+const handleMouseUp = () => {
+    isDragging = false;
+    if (canvasRef.value) {
+        canvasRef.value.style.cursor = 'grab';
+    }
 };
 onMounted(async () => {
     initWebgl();
+    const canvas = canvasRef.value;
+    canvas.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
 })
 onUnmounted(() => {
     if (previewUrl.value) {
         URL.revokeObjectURL(previewUrl.value);
     }
+    const canvas = canvasRef.value;
+    canvas.removeEventListener('mousedown', handleMouseDown);
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUp);
 })
 watch(imageLoaded, (newVal) => {
     if (newVal) drawImageToCanvas();
@@ -337,50 +394,57 @@ watch([fx, fy, cx, cy, k1, k2, k3, k4], () => {
 </script>
 <style scoped>
 .upload-area {
-  width: 1200px;
-  height: 500px;
-  border: 2px dashed #ccc;
-  border-radius: 8px;
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
+    width: 1200px;
+    height: 500px;
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
 }
+
 .preview-canvas {
-  width: 100%;
-  height: 100%;
+    width: 100%;
+    height: 100%;
 }
+
 .upload-tip {
-  color: #999;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-  margin-block-start: 0;
-  margin-block-end: 0;
+    color: #999;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    margin-block-start: 0;
+    margin-block-end: 0;
 }
+
 .slider-block {
-  width: 100%;
-  display: flex;
-  align-items: center;
+    width: 100%;
+    display: flex;
+    align-items: center;
 }
+
 .slider-block .el-slider {
-  margin-top: 0;
-  margin-left: 12px;
-  margin-right: 12px;
+    margin-top: 0;
+    margin-left: 12px;
+    margin-right: 12px;
 }
+
 .slider-block .demonstration {
-  font-size: 14px;
-  line-height: 44px;
-  flex: 0 0 4%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-bottom: 0;
+    font-size: 14px;
+    line-height: 44px;
+    flex: 0 0 4%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 0;
 }
-.slider-block .demonstration + .el-slider {
-  flex: 0 0 80%;
+
+.slider-block .demonstration+.el-slider {
+    flex: 0 0 80%;
 }
+
 .slider-block .tip {
     flex: 1;
 }

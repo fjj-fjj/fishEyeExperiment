@@ -303,51 +303,58 @@ watch([fx, fy, cx, cy, k1, k2, k3, k4], () => {
 </script>
 <style scoped>
 .upload-area {
-  width: 1200px;
-  height: 500px;
-  border: 2px dashed #ccc;
-  border-radius: 8px;
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
+    width: 1200px;
+    height: 500px;
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
 }
+
 .preview-canvas {
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
 }
+
 .upload-tip {
-  color: #999;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-  margin-block-start: 0;
-  margin-block-end: 0;
+    color: #999;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    margin-block-start: 0;
+    margin-block-end: 0;
 }
+
 .slider-block {
-  width: 100%;
-  display: flex;
-  align-items: center;
+    width: 100%;
+    display: flex;
+    align-items: center;
 }
+
 .slider-block .el-slider {
-  margin-top: 0;
-  margin-left: 12px;
-  margin-right: 12px;
+    margin-top: 0;
+    margin-left: 12px;
+    margin-right: 12px;
 }
+
 .slider-block .demonstration {
-  font-size: 14px;
-  line-height: 44px;
-  flex: 0 0 4%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-bottom: 0;
+    font-size: 14px;
+    line-height: 44px;
+    flex: 0 0 4%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 0;
 }
-.slider-block .demonstration + .el-slider {
-  flex: 0 0 80%;
+
+.slider-block .demonstration+.el-slider {
+    flex: 0 0 80%;
 }
+
 .slider-block .tip {
     flex: 1;
 }
