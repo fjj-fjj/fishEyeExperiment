@@ -9,7 +9,7 @@
         <div class="tip">{{ fx }}</div>
     </div>
     <div class="slider-block">
-        <span class="demonstration">Fy</span>
+        <span class="demonstration">fy</span>
         <el-slider v-model="fy" :min="0" :max="2000" :step="1" show-input />
         <div class="tip">{{ fy }}</div>
     </div>
@@ -48,7 +48,6 @@
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 const fileInput = ref(null);
 const uploadAreaRef = ref(null);
-const previewUrl = ref('');
 const canvasRef = ref(null);
 const imageLoaded = ref(false);
 let gl;
@@ -60,12 +59,12 @@ let program;
 let positionBuffer;
 let uniforms = {}; // 存储 uniform 位置
 let a_position_loc;
-let lastBoundTexture;
 let viewportOffset = { x: 0, y: 0 };
 let zoomLevel = 1.0;
 let isDragging = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
+let previewUrl;
 const MIN_ZOOM = 1.0;
 const MAX_ZOOM = 10.0;
 const fx = ref(0);
@@ -118,7 +117,7 @@ const fsSource = `
         float k3 = u_distort.z;
         float k4 = u_distort.w;
         float theta_d = theta * (1.0 + k1*theta2 + k2*theta4 + k3*theta6 + k4*theta8);
-        float scale = theta_d / max(r, 0.0001);
+        float scale = (r > 0.0) ? (theta_d / r) : 1.0;
         float x_dist = x * scale;
         float y_dist = y * scale;
         float u_src = fx * x_dist + cx;
@@ -151,6 +150,7 @@ const initWebgl = () => {
         console.error("WebGL not supported");
         return;
     }
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
     ext = gl.getExtension('OES_vertex_array_object');
     if (!ext) {
         console.warn('当前浏览器不支持 VAO 扩展！');
@@ -182,17 +182,19 @@ const initWebgl = () => {
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
     vao = ext.createVertexArrayOES();
     ext.bindVertexArrayOES(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
     gl.enableVertexAttribArray(a_position_loc);
     gl.vertexAttribPointer(a_position_loc, 2, gl.FLOAT, false, 0, 0);
     ext.bindVertexArrayOES(null);
     texture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    lastBoundTexture = texture;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.useProgram(program);
+    gl.uniform1i(uniforms.u_texture, 0);
 }
 const renderFrame = () => {
     if (!gl || !ext || !vao || !imageLoaded.value) return;
@@ -212,12 +214,6 @@ const renderFrame = () => {
     gl.uniform4fv(uniforms.u_intrinsic, uniformBuffers.u_intrinsic);
     gl.uniform1f(uniforms.u_Zoom, zoomLevel);
     gl.uniform2f(uniforms.u_PanOffset, viewportOffset.x, viewportOffset.y);
-    gl.activeTexture(gl.TEXTURE0);
-    if (lastBoundTexture !== texture) {
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        lastBoundTexture = texture;
-    }
-    gl.uniform1i(uniforms.u_texture, 0);
     ext.bindVertexArrayOES(vao);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -227,7 +223,7 @@ const drawImageToCanvas = async () => {
     await nextTick();
     const canvas = canvasRef.value;
     const uploadArea = uploadAreaRef.value;
-    if (!canvas || !uploadArea || !previewUrl.value || !gl) return;
+    if (!canvas || !uploadArea || !previewUrl || !gl) return;
     const boxW = uploadArea.clientWidth;
     const boxH = uploadArea.clientHeight;
     canvas.width = boxW;
@@ -268,12 +264,12 @@ const drawImageToCanvas = async () => {
         );
         renderFrame();
     };
-    img.src = previewUrl.value;
+    img.src = previewUrl;
 };
 const processFile = async (file) => {
     if (!file || !file.type.startsWith('image/')) return;
-    if (previewUrl.value) {
-        URL.revokeObjectURL(previewUrl.value);
+    if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
     }
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
@@ -288,7 +284,7 @@ const processFile = async (file) => {
         URL.revokeObjectURL(objectUrl);
     };
     img.src = objectUrl;
-    previewUrl.value = objectUrl;
+    previewUrl = objectUrl;
 };
 const triggerFileSelect = () => fileInput.value.click();
 const handleFileChange = (event) => {
@@ -345,7 +341,6 @@ const handleMouseDown = (event) => {
 };
 const handleMouseMove = (event) => {
     if (event.buttons === 0 && isDragging) {
-        // 检测到鼠标按键已经松开（即使 mouseup 事件没触发）
         handleMouseUp();
         return;
     }
@@ -364,24 +359,30 @@ const handleMouseMove = (event) => {
     renderFrame();
 };
 const handleMouseUp = () => {
-    isDragging = false;
-    if (canvasRef.value) {
-        canvasRef.value.style.cursor = 'grab';
+    if (isDragging) {
+        isDragging = false;
+        if (canvasRef.value) {
+            canvasRef.value.style.cursor = 'grab';
+        }
     }
 };
 onMounted(async () => {
     initWebgl();
     const canvas = canvasRef.value;
     canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mouseleave', handleMouseUp);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
 })
 onUnmounted(() => {
-    if (previewUrl.value) {
-        URL.revokeObjectURL(previewUrl.value);
+    if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
     }
     const canvas = canvasRef.value;
-    canvas.removeEventListener('mousedown', handleMouseDown);
+    if (canvas) {
+        canvas.removeEventListener('mousedown', handleMouseDown);
+        canvas.removeEventListener('mouseleave', handleMouseUp);
+    }
     window.removeEventListener('mousemove', handleMouseMove);
     window.removeEventListener('mouseup', handleMouseUp);
 })
