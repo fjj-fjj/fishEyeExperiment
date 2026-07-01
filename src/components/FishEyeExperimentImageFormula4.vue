@@ -39,9 +39,14 @@
         <div class="tip">{{ k3 }}</div>
     </div>
     <div class="slider-block">
-        <span class="demonstration">k4</span>
-        <el-slider v-model="k4" :min="-1" :max="1" :step="0.00001" show-input />
-        <div class="tip">{{ k4 }}</div>
+        <span class="demonstration">p1</span>
+        <el-slider v-model="p1" :min="-1" :max="1" :step="0.00001" show-input />
+        <div class="tip">{{ p1 }}</div>
+    </div>
+    <div class="slider-block">
+        <span class="demonstration">p2</span>
+        <el-slider v-model="p2" :min="-1" :max="1" :step="0.00001" show-input />
+        <div class="tip">{{ p2 }}</div>
     </div>
 </template>
 <script setup lang="js">
@@ -74,10 +79,12 @@ const cy = ref(1);
 const k1 = ref(0);
 const k2 = ref(0);
 const k3 = ref(0);
-const k4 = ref(0);
+const p1 = ref(0);
+const p2 = ref(0);
 const uniformBuffers = {
     u_imageSize: new Float32Array(2),
-    u_distort: new Float32Array(4),
+    u_distort_radial: new Float32Array(3),
+    u_distort_tan: new Float32Array(2),
     u_intrinsic: new Float32Array(4),
 };
 const vsSource = `
@@ -90,12 +97,13 @@ const vsSource = `
         gl_Position = vec4(a_position * u_Zoom + u_PanOffset, 0.0, 1.0);
       }
     `;
-//Kannala-Brandt 鱼眼模型
+//布朗-康拉迪模型
 const fsSource = `
       precision highp float;
       uniform sampler2D u_texture;
       uniform vec2 u_imageSize;
-      uniform vec4 u_distort; // k1,k2,k3,k4
+      uniform vec3 u_distort_radial; // k1,k2,k3
+      uniform vec2 u_distort_tan;//p1,p2
       uniform vec4 u_intrinsic; // fx,fy,cx,cy
       varying vec2 v_texCoord;
       void main() {
@@ -107,20 +115,21 @@ const fsSource = `
         float cy = u_intrinsic.w;
         float x = (u - cx) / fx;
         float y = (v - cy) / fy;
-        float r = sqrt(x * x + y * y);
-        float theta = atan(r);
-        float theta2 = theta * theta;
-        float theta4 = theta2 * theta2;
-        float theta6 = theta4 * theta2;
-        float theta8 = theta6 * theta2;
-        float k1 = u_distort.x;
-        float k2 = u_distort.y;
-        float k3 = u_distort.z;
-        float k4 = u_distort.w;
-        float theta_d = theta * (1.0 + k1*theta2 + k2*theta4 + k3*theta6 + k4*theta8);
-        float scale = (r > 0.0) ? (theta_d / r) : 1.0;
-        float x_dist = x * scale;
-        float y_dist = y * scale;
+        float r2 = x * x + y * y;
+        float r4 = r2 * r2;
+        float r6 = r4 * r2;
+        float k1 = u_distort_radial.x;
+        float k2 = u_distort_radial.y;
+        float k3 = u_distort_radial.z;
+        float p1 = u_distort_tan.x;
+        float p2 = u_distort_tan.y;
+        float radial_factor = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
+        float x_rad = x * radial_factor;
+        float y_rad = y * radial_factor;
+        float x_tan = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+        float y_tan = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+        float x_dist = x_rad + x_tan;
+        float y_dist = y_rad + y_tan;
         float u_src = fx * x_dist + cx;
         float v_src = fy * y_dist + cy;
         vec2 src_tex = vec2(u_src / u_imageSize.x, v_src / u_imageSize.y);
@@ -174,7 +183,8 @@ const initWebgl = () => {
         u_PanOffset: gl.getUniformLocation(program, 'u_PanOffset'),
         u_texture: gl.getUniformLocation(program, 'u_texture'),
         u_imageSize: gl.getUniformLocation(program, 'u_imageSize'),
-        u_distort: gl.getUniformLocation(program, 'u_distort'),
+        u_distort_radial: gl.getUniformLocation(program, 'u_distort_radial'),
+        u_distort_tan: gl.getUniformLocation(program, 'u_distort_tan'),
         u_intrinsic: gl.getUniformLocation(program, 'u_intrinsic'),
     };
     positionBuffer = gl.createBuffer();
@@ -203,11 +213,13 @@ const renderFrame = () => {
     uniformBuffers.u_imageSize[0] = imgOriginalSize.width;
     uniformBuffers.u_imageSize[1] = imgOriginalSize.height;
     gl.uniform2fv(uniforms.u_imageSize, uniformBuffers.u_imageSize);
-    uniformBuffers.u_distort[0] = k1.value;
-    uniformBuffers.u_distort[1] = k2.value;
-    uniformBuffers.u_distort[2] = k3.value;
-    uniformBuffers.u_distort[3] = k4.value;
-    gl.uniform4fv(uniforms.u_distort, uniformBuffers.u_distort);
+    uniformBuffers.u_distort_radial[0] = k1.value;
+    uniformBuffers.u_distort_radial[1] = k2.value;
+    uniformBuffers.u_distort_radial[2] = k3.value;
+    uniformBuffers.u_distort_tan[0] = p1.value;
+    uniformBuffers.u_distort_tan[1] = p2.value;
+    gl.uniform3fv(uniforms.u_distort_radial, uniformBuffers.u_distort_radial);
+    gl.uniform2fv(uniforms.u_distort_tan, uniformBuffers.u_distort_tan);
     uniformBuffers.u_intrinsic[0] = fx.value;
     uniformBuffers.u_intrinsic[1] = fy.value;
     uniformBuffers.u_intrinsic[2] = cx.value;
@@ -390,7 +402,7 @@ onUnmounted(() => {
 watch(imageLoaded, (newVal) => {
     if (newVal) drawImageToCanvas();
 })
-watch([fx, fy, cx, cy, k1, k2, k3, k4], () => {
+watch([fx, fy, cx, cy, k1, k2, k3, p1, p2], () => {
     if (imageLoaded.value) renderFrame();
 })
 </script>
